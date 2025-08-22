@@ -94,7 +94,7 @@ class PriceTracker:
                         logger.error(f"❌ [{self.exchange_id}] MongoDB connection failed: {e}")
                 
                 # Check exchange connection
-                if self.exchange and hasattr(self.exchange, 'ping'):
+                if self.exchange and hasattr(self.exchange, 'ping') and callable(getattr(self.exchange, 'ping', None)):
                     try:
                         await self.exchange.ping()
                     except Exception as e:
