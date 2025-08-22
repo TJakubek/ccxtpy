@@ -166,32 +166,47 @@ class PriceTracker:
             logger.error(f"❌ Error establishing orderbook watch for '{self.exchange_id}' {symbol}: {e}")
     
     async def start_exchange_watchers(self):
-        """Start all watchers for the exchange."""
+        """Start all watchers for the exchange and keep them running."""
         pairs = await self.get_available_pairs()
         if not pairs:
             logger.warning(f"⚠️ No pairs available for exchange '{self.exchange_id}'")
             return
         
-        exchange_tasks = []
+        # Set up watchers (these complete quickly)
+        setup_tasks = []
         for pair in pairs:
             symbol = pair['market']
             # Create ticker watcher
             if self.exchange.has.get('watchTicker'):
                 task = asyncio.create_task(self.watch_ticker(symbol))
-                exchange_tasks.append(task)
+                setup_tasks.append(task)
             
             # Create orderbook watcher
             if self.exchange.has.get('watchOrderBook'):
                 task = asyncio.create_task(self.watch_orderbook(symbol))
-                exchange_tasks.append(task)
+                setup_tasks.append(task)
         
-        logger.info(f"👀 Started {len(exchange_tasks)} watchers for exchange '{self.exchange_id}'")
-        self.tasks.extend(exchange_tasks)
+        logger.info(f"👀 Setting up {len(setup_tasks)} watchers for exchange '{self.exchange_id}'")
         
         try:
-            await asyncio.gather(*exchange_tasks, return_exceptions=True)
+            # Wait for all watchers to be set up
+            results = await asyncio.gather(*setup_tasks, return_exceptions=True)
+            
+            # Check for any exceptions in the setup
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"❌ Watcher setup {i} failed: {result}")
+                    
+            logger.info(f"✅ All watchers set up for '{self.exchange_id}', now monitoring...")
+            
+            # Keep the watcher task alive by waiting for shutdown
+            while not self.shutdown_event.is_set():
+                await asyncio.sleep(5)  # Check every 5 seconds
+                
         except Exception as e:
             logger.error(f"❌ Error in exchange watchers for '{self.exchange_id}': {e}")
+            
+        logger.info(f"🏁 Exchange watchers shutting down for '{self.exchange_id}'")
     
     def get_price_collection(self, symbol):
         if not self.client:  # Initialize MongoDB client if not already connected
@@ -257,54 +272,59 @@ class PriceTracker:
                                     priceDict[token] = []
                                 priceDict[token].append({"sourceId": source, "price": mid_price})
 
-                # Save to MongoDB for each token
+                # Save to MongoDB for each token (synchronous operations)
                 total_prices_saved = 0
+                save_start = time.time()
+                
                 for token, prices_data in priceDict.items():
                     if self.shutdown_event.is_set():  # Check shutdown during save
                         break
                         
-                    collection = self.get_price_collection(token)
-                    
-                    # First try to find existing document
-                    existing_doc = collection.find_one({'timestamp': current_ts, 'sourceId': general_source_id})
-                    
-                    if existing_doc:
-                        # Document exists, append new prices to existing array
-                        result = collection.update_one(
-                            {'timestamp': current_ts, 'sourceId': general_source_id},
-                            {
-                                '$addToSet': {
-                                    'prices': {'$each': prices_data}
-                                }
-                            }
-                        )
-                    else:
-                        # Document doesn't exist, create new one
-                        result = collection.update_one(
+                    # Check if we're approaching 0.8s limit for saves
+                    if time.time() - save_start > 0.8:
+                        logger.warning(f"⚠️ Skipping remaining MongoDB saves (time limit reached)")
+                        break
+                        
+                    try:
+                        collection = self.get_price_collection(token)
+                        
+                        # Single upsert operation - create document with prices or add to existing
+                        collection.update_one(
                             {'timestamp': current_ts, 'sourceId': general_source_id},
                             {
                                 '$setOnInsert': {
                                     'timestamp': current_ts,
-                                    'sourceId': general_source_id,
-                                    'prices': prices_data
+                                    'sourceId': general_source_id
+                                },
+                                '$addToSet': {
+                                    'prices': {'$each': prices_data}
                                 }
                             },
                             upsert=True
                         )
-                    
-                    total_prices_saved += len(prices_data)
+                        
+                        total_prices_saved += len(prices_data)
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Error saving {token} prices: {e}")
+                        continue
 
                 save_time = time.time() - start_time
                 logger.info(f"{current_ts} saved {total_prices_saved} prices from {len(self.trackedStuff)} unique watchers in {save_time:.3f}s")
                 
-                # Sleep for the remainder of the second
+                # Calculate sleep time to maintain <= 1s total cycle time
                 elapsed = time.time() - start_time
-                sleep_time = max(0, 1.0 - elapsed)
                 
-                if sleep_time > 0.05:
-                    await asyncio.sleep(sleep_time)
+                # Cap maximum cycle time at 1 second
+                if elapsed >= 1.0:
+                    logger.warning(f"⚠️ Save operation took {elapsed:.3f}s (>= 1s), skipping sleep")
+                    # Don't sleep if we're already at or over 1 second
+                    continue
                 else:
-                    logger.warning(f"⚠️ Save operation took {elapsed:.3f}s (longer than 1s interval)")
+                    # Sleep for remainder of 1 second, but cap at 0.95s to prevent drift
+                    sleep_time = min(1.0 - elapsed, 0.95)
+                    if sleep_time > 0.01:  # Only sleep if meaningful time remaining
+                        await asyncio.sleep(sleep_time)
                     
             except Exception as e:
                 logger.error(f"❌ Error saving to MongoDB: {e}")
@@ -336,12 +356,18 @@ class PriceTracker:
                 done_tasks = [task for task in all_tasks if task.done()]
                 if done_tasks:
                     logger.warning(f"⚠️ {len(done_tasks)} tasks completed unexpectedly")
-                    for task in done_tasks:
+                    for i, task in enumerate(done_tasks):
+                        task_name = "watcher_task" if i == 0 else "save_task"
                         try:
-                            if task.exception():
-                                logger.error(f"❌ Task failed with: {task.exception()}")
+                            exception = task.exception()
+                            if exception:
+                                logger.error(f"❌ {task_name} failed with: {exception}")
+                                import traceback
+                                logger.error(f"❌ {task_name} traceback: {traceback.format_exception(type(exception), exception, exception.__traceback__)}")
+                            else:
+                                logger.warning(f"⚠️ {task_name} completed normally (unexpected)")
                         except asyncio.InvalidStateError:
-                            pass
+                            logger.warning(f"⚠️ {task_name} state unavailable")
                     break
                 
                 # Wait a bit before checking again, or until shutdown signal
