@@ -37,21 +37,47 @@ export const spawnPythonProcess = async (exchange: string, tokens?: string[]) =>
 
   // Only add cleanup listeners once
   if (!cleanupListenersAdded) {
-    const cleanup = () => {
-      console.log(`Killing ${pythonProcesses.length} Python processes...`);
-      pythonProcesses.forEach((process) => {
+    const cleanup = async () => {
+      console.log(`Gracefully shutting down ${pythonProcesses.length} Python processes...`);
+      
+      // Send SIGTERM to all processes
+      const shutdownPromises = pythonProcesses.map(async (process) => {
         if (process && !process.killed) {
+          console.log(`Sending SIGTERM to PID: ${process.pid}`);
           process.kill("SIGTERM");
+          
+          // Wait up to 10 seconds for graceful shutdown
+          return new Promise<void>((resolve) => {
+            const timeout = setTimeout(() => {
+              if (!process.killed) {
+                console.log(`Force killing PID: ${process.pid} after timeout`);
+                process.kill("SIGKILL");
+              }
+              resolve();
+            }, 10000);
+            
+            process.on("exit", () => {
+              clearTimeout(timeout);
+              resolve();
+            });
+          });
         }
       });
-      process.exit();
+      
+      try {
+        await Promise.all(shutdownPromises);
+        console.log("✅ All Python processes shut down gracefully");
+      } catch (error) {
+        console.error("❌ Error during shutdown:", error);
+      }
+      
+      process.exit(0);
     };
 
     // Capture termination signals
     process.on("SIGINT", cleanup); // Ctrl+C
     process.on("SIGTERM", cleanup); // Kill command
-    process.on("exit", cleanup); // Exit triggered from anywhere
-
+    
     cleanupListenersAdded = true;
   }
 };

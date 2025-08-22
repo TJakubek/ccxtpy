@@ -330,8 +330,27 @@ class PriceTracker:
             
             logger.info(f"🚀 All systems running for exchange '{self.exchange_id}'! Waiting for termination signal...")
             
-            # Wait for all tasks
-            await asyncio.gather(*all_tasks, return_exceptions=True)
+            # Monitor tasks and shutdown event
+            while not self.shutdown_event.is_set():
+                # Check if any critical task has finished unexpectedly
+                done_tasks = [task for task in all_tasks if task.done()]
+                if done_tasks:
+                    logger.warning(f"⚠️ {len(done_tasks)} tasks completed unexpectedly")
+                    for task in done_tasks:
+                        try:
+                            if task.exception():
+                                logger.error(f"❌ Task failed with: {task.exception()}")
+                        except asyncio.InvalidStateError:
+                            pass
+                    break
+                
+                # Wait a bit before checking again, or until shutdown signal
+                try:
+                    await asyncio.wait_for(self.shutdown_event.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+            
+            logger.info("🛑 Shutdown initiated, cleaning up...")
             
         except KeyboardInterrupt:
             logger.info("\n⚠️ Received interrupt signal")
@@ -364,10 +383,22 @@ class PriceTracker:
             
         logger.info("🧹 Starting async cleanup...")
         
-        # Signal shutdown
+        # Signal shutdown first
         self.shutdown_event.set()
         
-        # Cancel all tasks
+        # Close exchange connections first to stop new data
+        if self.exchange:
+            logger.info(f"🏦 Closing exchange '{self.exchange_id}'...")
+            try:
+                # Give exchange 3 seconds to close gracefully
+                await asyncio.wait_for(self.exchange.close(), timeout=3.0)
+                logger.info("✅ Exchange closed successfully")
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Exchange close timed out")
+            except Exception as e:
+                logger.error(f"❌ Error closing exchange '{self.exchange_id}': {e}")
+        
+        # Cancel all tasks after exchange is closed
         if self.tasks:
             logger.info(f"🛑 Cancelling {len(self.tasks)} tasks...")
             for task in self.tasks:
@@ -378,24 +409,54 @@ class PriceTracker:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*self.tasks, return_exceptions=True),
-                    timeout=5.0
+                    timeout=3.0
                 )
+                logger.info("✅ All tasks cancelled successfully")
             except asyncio.TimeoutError:
-                logger.warning("⚠️ Task cancellation timed out")
+                logger.warning("⚠️ Task cancellation timed out after 3s")
         
-        # Close exchange
-        if self.exchange:
-            logger.info(f"🏦 Closing exchange '{self.exchange_id}'...")
+        # Final MongoDB save before closing
+        if self.client and self.trackedStuff:
+            logger.info("💾 Performing final MongoDB save...")
             try:
-                await self.exchange.close()
+                # Quick final save of current data
+                current_ts = self.current_timestamp()
+                priceDict = {}
+                
+                for item in self.trackedStuff.values():
+                    exchange = item.get("exchange")
+                    method = item.get("method")
+                    symbol = item.get("symbol")
+                    source = item.get("source")
+                    token = symbol.split('/')[0]
+                    
+                    if method == "ticker":
+                        ticker = exchange.tickers.get(symbol)
+                        if ticker and "last" in ticker and ticker["last"] is not None:
+                            price = float(ticker["last"])
+                            if token not in priceDict:
+                                priceDict[token] = []
+                            priceDict[token].append({"sourceId": f"{source}_last", "price": price})
+                
+                # Save final data
+                for token, prices_data in priceDict.items():
+                    collection = self.get_price_collection(token)
+                    collection.update_one(
+                        {'timestamp': current_ts, 'sourceId': general_source_id},
+                        {'$setOnInsert': {'timestamp': current_ts, 'sourceId': general_source_id, 'prices': prices_data}},
+                        upsert=True
+                    )
+                
+                logger.info(f"✅ Final save completed: {sum(len(p) for p in priceDict.values())} prices")
             except Exception as e:
-                logger.error(f"❌ Error closing exchange '{self.exchange_id}': {e}")
+                logger.error(f"❌ Error in final save: {e}")
         
         # Close MongoDB connection
         if self.client:
             logger.info("🔌 Closing MongoDB connection...")
             try:
                 self.client.close()
+                logger.info("✅ MongoDB connection closed")
             except Exception as e:
                 logger.error(f"❌ Error closing MongoDB connection: {e}")
         
@@ -408,16 +469,18 @@ tracker = None
 def signal_handler(signum, frame):
     """Handle interrupt signals."""
     global tracker
-    logger.info(f"\n⚠️ Received signal {signum}")
+    logger.info(f"\n⚠️ Received signal {signum} - initiating graceful shutdown")
     if tracker and not tracker.shutdown_event.is_set():
         tracker.shutdown_event.set()
         
-        # Force immediate cleanup if possible
+        # Schedule cleanup task
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(tracker.cleanup())
+            # Don't create new task, let the main loop handle shutdown
+            logger.info("🛑 Shutdown event set, main loop will handle cleanup")
         except RuntimeError:
-            # No running loop, do sync cleanup
+            # No running loop, do sync cleanup as last resort
+            logger.warning("⚠️ No event loop found, performing sync cleanup")
             tracker.sync_cleanup()
 
 async def main():
