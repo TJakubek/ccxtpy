@@ -310,7 +310,7 @@ class PriceTracker:
                         continue
 
                 save_time = time.time() - start_time
-                logger.info(f"{current_ts} saved {total_prices_saved} prices from {len(self.trackedStuff)} unique watchers in {save_time:.3f}s")
+                logger.info(f"[{self.exchange_id}] {current_ts} saved {total_prices_saved} prices from {len(self.trackedStuff)} unique watchers in {save_time:.3f}s")
                 
                 # Calculate sleep time to maintain <= 1s total cycle time
                 elapsed = time.time() - start_time
