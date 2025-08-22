@@ -148,8 +148,8 @@ class PriceTracker:
             await self.exchange.load_markets()
             available_pairs = []
 
-            # log markets
-            logger.info(f"📈 [{self.exchange_id}] Available markets: {list(self.exchange.markets.keys())}")
+            # # log markets
+            # logger.info(f"📈 [{self.exchange_id}] Available markets: {list(self.exchange.markets.keys())}")
 
             for token in self.tokens:
                 for quote in QUOTE_CURRENCIES:
@@ -218,38 +218,23 @@ class PriceTracker:
             logger.error(f"❌ Error establishing orderbook watch for '{self.exchange_id}' {symbol}: {e}")
     
     async def start_exchange_watchers(self):
-        """Start all watchers for the exchange and keep them running."""
+        """Start all watchers for the exchange using bulk methods when possible."""
         pairs = await self.get_available_pairs()
         if not pairs:
             logger.warning(f"⚠️ No pairs available for exchange '{self.exchange_id}'")
             return
         
-        # Set up watchers (these complete quickly)
-        setup_tasks = []
-        for pair in pairs:
-            symbol = pair['market']
-            # Create ticker watcher
-            if self.exchange.has.get('watchTicker'):
-                task = asyncio.create_task(self.watch_ticker(symbol))
-                setup_tasks.append(task)
-            
-            # Create orderbook watcher
-            if self.exchange.has.get('watchOrderBook'):
-                task = asyncio.create_task(self.watch_orderbook(symbol))
-                setup_tasks.append(task)
-        
-        logger.info(f"👀 Setting up {len(setup_tasks)} watchers for exchange '{self.exchange_id}'")
+        symbols = [pair['market'] for pair in pairs]
+        logger.info(f"👀 Setting up watchers for {len(symbols)} symbols on '{self.exchange_id}'")
         
         try:
-            # Wait for all watchers to be set up
-            results = await asyncio.gather(*setup_tasks, return_exceptions=True)
-            
-            # Check for any exceptions in the setup
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.error(f"❌ Watcher setup {i} failed: {result}")
-                    
-            logger.info(f"✅ All watchers set up for '{self.exchange_id}', now monitoring...")
+            # Try bulk methods first (more efficient)
+            if await self._setup_bulk_watchers(symbols):
+                logger.info(f"✅ Bulk watchers set up for '{self.exchange_id}'")
+            else:
+                # Fallback to individual watchers
+                await self._setup_individual_watchers(symbols)
+                logger.info(f"✅ Individual watchers set up for '{self.exchange_id}'")
             
             # Keep the watcher task alive by waiting for shutdown
             while not self.shutdown_event.is_set():
@@ -259,6 +244,85 @@ class PriceTracker:
             logger.error(f"❌ Error in exchange watchers for '{self.exchange_id}': {e}")
             
         logger.info(f"🏁 Exchange watchers shutting down for '{self.exchange_id}'")
+    
+    async def _setup_bulk_watchers(self, symbols: list) -> bool:
+        """Try to set up bulk watchers. Returns True if successful, False otherwise."""
+        bulk_success = False
+        
+        # Try bulk ticker watching
+        if self.exchange.has.get('watchTickers'):
+            try:
+                logger.info(f"🔄 [{self.exchange_id}] Using bulk ticker watching for {len(symbols)} symbols")
+                await self.exchange.watch_tickers(symbols)
+                
+                # Track all symbols as ticker watchers
+                for symbol in symbols:
+                    tickerId = f"{self.exchange_id}_{symbol}_ticker_py"
+                    self._add_tracked_item("ticker", symbol, self.exchange, tickerId)
+                
+                bulk_success = True
+                logger.info(f"✅ [{self.exchange_id}] Bulk ticker watching established")
+            except Exception as e:
+                logger.warning(f"⚠️ [{self.exchange_id}] Bulk ticker watching failed: {e}")
+        
+        # Try bulk orderbook watching (newer CCXT versions)
+        if self.exchange.has.get('watchOrderBookForSymbols'):
+            try:
+                default_limit = 20
+                limit_overrides = {
+                    "bitfinex": 25, "bitfinex1": 25, "bitmex": 25,
+                    "bybit": 1, "kraken": 10, "poloniexfutures": 5
+                }
+                limit = limit_overrides.get(self.exchange_id, default_limit)
+                
+                logger.info(f"🔄 [{self.exchange_id}] Using bulk orderbook watching for {len(symbols)} symbols")
+                await self.exchange.watch_order_book_for_symbols(symbols, limit)
+                
+                # Track all symbols as orderbook watchers
+                for symbol in symbols:
+                    orderbookId = f"{self.exchange_id}_{symbol}_orderbook_py"
+                    self._add_tracked_item("orderbook", symbol, self.exchange, orderbookId)
+                
+                bulk_success = True
+                logger.info(f"✅ [{self.exchange_id}] Bulk orderbook watching established")
+            except Exception as e:
+                logger.warning(f"⚠️ [{self.exchange_id}] Bulk orderbook watching failed: {e}")
+        
+        return bulk_success
+    
+    async def _setup_individual_watchers(self, symbols: list):
+        """Set up individual watchers as fallback."""
+        logger.info(f"🔄 [{self.exchange_id}] Using individual watchers for {len(symbols)} symbols")
+        
+        # Batch individual watchers to avoid overwhelming the exchange
+        batch_size = 10  # Process 10 symbols at a time
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+            setup_tasks = []
+            
+            for symbol in batch:
+                # Create ticker watcher
+                if self.exchange.has.get('watchTicker'):
+                    task = asyncio.create_task(self.watch_ticker(symbol))
+                    setup_tasks.append(task)
+                
+                # Create orderbook watcher
+                if self.exchange.has.get('watchOrderBook'):
+                    task = asyncio.create_task(self.watch_orderbook(symbol))
+                    setup_tasks.append(task)
+            
+            # Wait for batch to complete
+            if setup_tasks:
+                results = await asyncio.gather(*setup_tasks, return_exceptions=True)
+                
+                # Check for exceptions in this batch
+                for j, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(f"❌ [{self.exchange_id}] Watcher setup failed for batch {i//batch_size + 1}, task {j}: {result}")
+                
+                # Small delay between batches to respect rate limits
+                if i + batch_size < len(symbols):
+                    await asyncio.sleep(1)
     
     def get_price_collection(self, symbol):
         if not self.client:  # Initialize MongoDB client if not already connected
