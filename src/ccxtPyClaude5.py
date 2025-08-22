@@ -37,7 +37,7 @@ DEFAULT_TOKENS = [
 ]
 
 # List of quote currencies to pair with tokens
-QUOTE_CURRENCIES = ["USD", "USDT", "USDC"]
+QUOTE_CURRENCIES = ["USD", "USDT", "USDC", "USDT:USDT"]
 
 class PriceTracker:
     def __init__(self, exchange_id: str, tokens: List[str] = None):
@@ -147,7 +147,10 @@ class PriceTracker:
         try:
             await self.exchange.load_markets()
             available_pairs = []
-            
+
+            # log markets
+            logger.info(f"📈 [{self.exchange_id}] Available markets: {list(self.exchange.markets.keys())}")
+
             for token in self.tokens:
                 for quote in QUOTE_CURRENCIES:
                     if self.exchange_id == "htx" and quote == "USDC":
@@ -438,12 +441,12 @@ class PriceTracker:
                 except asyncio.TimeoutError:
                     pass
             
-            logger.info("🛑 Shutdown initiated, cleaning up...")
+            logger.info(f"🛑 [{self.exchange_id}] Shutdown initiated, cleaning up...")
             
         except KeyboardInterrupt:
-            logger.info("\n⚠️ Received interrupt signal")
+            logger.info(f"\n⚠️ [{self.exchange_id}] Received interrupt signal")
         except Exception as e:
-            logger.error(f"❌ Unexpected error: {e}")
+            logger.error(f"❌ [{self.exchange_id}] Unexpected error: {e}")
         finally:
             await self.cleanup()
     
@@ -452,15 +455,15 @@ class PriceTracker:
         if self._cleanup_done:
             return
             
-        logger.info("🧹 Performing synchronous cleanup...")
+        logger.info(f"🧹 [{self.exchange_id}] Performing synchronous cleanup...")
         
         # Close MongoDB connection
         if self.client:
             try:
                 self.client.close()
-                logger.info("🔌 MongoDB connection closed (sync)")
+                logger.info(f"🔌 [{self.exchange_id}] MongoDB connection closed (sync)")
             except Exception as e:
-                logger.error(f"❌ Error closing MongoDB connection (sync): {e}")
+                logger.error(f"❌ [{self.exchange_id}] Error closing MongoDB connection (sync): {e}")
         
         self._cleanup_done = True
     
@@ -469,26 +472,26 @@ class PriceTracker:
         if self._cleanup_done:
             return
             
-        logger.info("🧹 Starting async cleanup...")
+        logger.info(f"🧹 [{self.exchange_id}] Starting async cleanup...")
         
         # Signal shutdown first
         self.shutdown_event.set()
         
         # Close exchange connections first to stop new data
         if self.exchange:
-            logger.info(f"🏦 Closing exchange '{self.exchange_id}'...")
+            logger.info(f"🏦 [{self.exchange_id}] Closing exchange...")
             try:
                 # Give exchange 3 seconds to close gracefully
                 await asyncio.wait_for(self.exchange.close(), timeout=3.0)
-                logger.info("✅ Exchange closed successfully")
+                logger.info(f"✅ [{self.exchange_id}] Exchange closed successfully")
             except asyncio.TimeoutError:
-                logger.warning("⚠️ Exchange close timed out")
+                logger.warning(f"⚠️ [{self.exchange_id}] Exchange close timed out")
             except Exception as e:
-                logger.error(f"❌ Error closing exchange '{self.exchange_id}': {e}")
+                logger.error(f"❌ [{self.exchange_id}] Error closing exchange: {e}")
         
         # Cancel all tasks after exchange is closed
         if self.tasks:
-            logger.info(f"🛑 Cancelling {len(self.tasks)} tasks...")
+            logger.info(f"🛑 [{self.exchange_id}] Cancelling {len(self.tasks)} tasks...")
             for task in self.tasks:
                 if not task.done():
                     task.cancel()
@@ -499,13 +502,13 @@ class PriceTracker:
                     asyncio.gather(*self.tasks, return_exceptions=True),
                     timeout=3.0
                 )
-                logger.info("✅ All tasks cancelled successfully")
+                logger.info(f"✅ [{self.exchange_id}] All tasks cancelled successfully")
             except asyncio.TimeoutError:
-                logger.warning("⚠️ Task cancellation timed out after 3s")
+                logger.warning(f"⚠️ [{self.exchange_id}] Task cancellation timed out after 3s")
         
         # Final MongoDB save before closing
         if self.client and self.trackedStuff:
-            logger.info("💾 Performing final MongoDB save...")
+            logger.info(f"💾 [{self.exchange_id}] Performing final MongoDB save...")
             try:
                 # Quick final save of current data
                 current_ts = self.current_timestamp()
@@ -535,21 +538,21 @@ class PriceTracker:
                         upsert=True
                     )
                 
-                logger.info(f"✅ Final save completed: {sum(len(p) for p in priceDict.values())} prices")
+                logger.info(f"✅ [{self.exchange_id}] Final save completed: {sum(len(p) for p in priceDict.values())} prices")
             except Exception as e:
-                logger.error(f"❌ Error in final save: {e}")
+                logger.error(f"❌ [{self.exchange_id}] Error in final save: {e}")
         
         # Close MongoDB connection
         if self.client:
-            logger.info("🔌 Closing MongoDB connection...")
+            logger.info(f"🔌 [{self.exchange_id}] Closing MongoDB connection...")
             try:
                 self.client.close()
-                logger.info("✅ MongoDB connection closed")
+                logger.info(f"✅ [{self.exchange_id}] MongoDB connection closed")
             except Exception as e:
-                logger.error(f"❌ Error closing MongoDB connection: {e}")
+                logger.error(f"❌ [{self.exchange_id}] Error closing MongoDB connection: {e}")
         
         self._cleanup_done = True
-        logger.info("✅ Cleanup completed")
+        logger.info(f"✅ [{self.exchange_id}] Cleanup completed")
 
 # Global tracker instance for signal handling
 tracker = None
@@ -601,13 +604,13 @@ async def main():
     try:
         await tracker.run()
     except KeyboardInterrupt:
-        logger.info("\n❌ Script interrupted by user")
+        logger.info(f"\n❌ [{exchange_id}] Script interrupted by user")
     except Exception as e:
-        logger.error(f"🚨 Fatal error: {e}")
+        logger.error(f"🚨 [{exchange_id}] Fatal error: {e}")
     finally:
         if tracker:
             await tracker.cleanup()
-        logger.info("🛑 Script terminated")
+        logger.info(f"🛑 [{exchange_id}] Script terminated")
 
 if __name__ == "__main__":
     try:
