@@ -56,10 +56,12 @@ class PriceTracker:
         
         # Health monitoring
         self.last_save_time = time.time()
+        self.last_successful_save_time = time.time()  # Track when we actually saved prices
         self.last_data_received = time.time()
         self.health_check_interval = 30  # Check every 30 seconds
         self.max_save_silence = 300  # Alert if no saves for 5 minutes
         self.max_data_silence = 60   # Alert if no data for 1 minute
+        self.max_no_prices_restart = 300  # Restart if no prices saved for 5 minutes
         
         # Register cleanup on exit
         atexit.register(self.sync_cleanup)
@@ -86,6 +88,16 @@ class PriceTracker:
                 if time_since_data > self.max_data_silence:
                     logger.warning(f"⚠️ [{self.exchange_id}] No price data received for {time_since_data:.0f}s - possible connection issue")
                 
+                # Check if we need to restart due to no prices being saved
+                time_since_successful_save = current_time - self.last_successful_save_time
+                if time_since_successful_save > self.max_no_prices_restart:
+                    logger.error(f"🚨 [{self.exchange_id}] No prices saved for {time_since_successful_save:.0f}s - triggering restart")
+                    # Trigger restart by setting shutdown event and exiting with non-zero code
+                    self.shutdown_event.set()
+                    # Exit with code 2 to signal restart needed
+                    import os
+                    os._exit(2)
+                
                 # Check MongoDB connection
                 if self.client:
                     try:
@@ -102,7 +114,7 @@ class PriceTracker:
                 
                 # Report health stats
                 active_watchers = len(self.trackedStuff)
-                logger.info(f"💓 [{self.exchange_id}] Health: {active_watchers} watchers, last save {time_since_save:.0f}s ago, last data {time_since_data:.0f}s ago")
+                logger.info(f"💓 [{self.exchange_id}] Health: {active_watchers} watchers, last save {time_since_save:.0f}s ago, last data {time_since_data:.0f}s ago, last prices {time_since_successful_save:.0f}s ago")
                 
                 await asyncio.sleep(self.health_check_interval)
                 
@@ -435,6 +447,11 @@ class PriceTracker:
 
                 save_time = time.time() - start_time
                 self.last_save_time = time.time()  # Update last save time for health monitoring
+                
+                # Track successful saves (only when prices were actually saved)
+                if total_prices_saved > 0:
+                    self.last_successful_save_time = time.time()
+                
                 logger.info(f"[{self.exchange_id}] {current_ts} saved {total_prices_saved} prices from {len(self.trackedStuff)} unique watchers in {save_time:.3f}s")
                 
                 # Calculate sleep time to maintain <= 1s total cycle time

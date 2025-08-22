@@ -5,16 +5,16 @@ import * as dotenv from "dotenv";
 dotenv.config();
 
 const exchanges = [
-  "ascendex",
-  "bequant",
-  "binance",
-  "binanceus",
-  "binanceusdm",
-  "bingx",
-  "bitfinex",
-  "bitfinex1",
+  // "ascendex",
+  // "bequant",
+  // "binance",
+  // "binanceus",
+  // "binanceusdm",
+  // "bingx",
+  // "bitfinex",
+  // "bitfinex1",
   "bitget",
-  "bitmart",
+  // "bitmart",
   "bitmex",
   //   // # 'bitopro', this one fucked up
   //   "bitrue",

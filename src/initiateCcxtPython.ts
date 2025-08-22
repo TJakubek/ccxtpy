@@ -65,6 +65,7 @@ const shouldRestart = (
   }
 
   // Restart if process crashed (non-zero exit code) or unexpected signal
+  // Exit code 2 = explicit restart request from health monitor
   return code !== 0 || (signal && !["SIGTERM", "SIGINT"].includes(signal));
 };
 
@@ -108,7 +109,11 @@ const setupProcessHandlers = (processInfo: ProcessInfo) => {
 
     // Check if we should restart
     if (shouldRestart(processInfo, code, signal)) {
-      console.log(`🚨 Unexpected exit for ${exchange}, scheduling restart...`);
+      if (code === 2) {
+        console.log(`🔄 Health monitor triggered restart for ${exchange} (no prices for 5+ minutes)`);
+      } else {
+        console.log(`🚨 Unexpected exit for ${exchange} (code: ${code}, signal: ${signal}), scheduling restart...`);
+      }
       setTimeout(() => restartProcess(processInfo), 1000); // Small delay before restart
     } else {
       console.log(
