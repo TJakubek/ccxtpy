@@ -1,0 +1,23 @@
+{
+  "name": "ccxtpy",
+  "version": "1.0.0",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib"
+  },
+  "scripts": {
+    "activate": "./run-in-venv.sh",
+    "start": "node --require ts-node/register ./src/index.ts",
+    "installPython":"pip install -r requirements.txt"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@types/node": "^24.0.1"
+  },
+  "dependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}

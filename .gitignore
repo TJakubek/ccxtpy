@@ -1,0 +1,6 @@
+bin
+lib
+lib64
+node_modules
+include
+__pycache__
