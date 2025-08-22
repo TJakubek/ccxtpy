@@ -54,12 +54,61 @@ class PriceTracker:
         self.trackedStuff = {}  # Key: (method, symbol), Value: item dict
         self._cleanup_done = False
         
+        # Health monitoring
+        self.last_save_time = time.time()
+        self.last_data_received = time.time()
+        self.health_check_interval = 30  # Check every 30 seconds
+        self.max_save_silence = 300  # Alert if no saves for 5 minutes
+        self.max_data_silence = 60   # Alert if no data for 1 minute
+        
         # Register cleanup on exit
         atexit.register(self.sync_cleanup)
         
     def current_timestamp(self):
         """Returns the current UTC timestamp in whole seconds."""
         return round(datetime.now().timestamp())
+    
+    async def health_monitor(self):
+        """Monitor system health and report issues."""
+        logger.info(f"🏥 Started health monitor for '{self.exchange_id}'")
+        
+        while not self.shutdown_event.is_set():
+            try:
+                current_time = time.time()
+                
+                # Check if saves are happening
+                time_since_save = current_time - self.last_save_time
+                if time_since_save > self.max_save_silence:
+                    logger.warning(f"⚠️ [{self.exchange_id}] No MongoDB saves for {time_since_save:.0f}s - possible issue")
+                
+                # Check if data is being received
+                time_since_data = current_time - self.last_data_received
+                if time_since_data > self.max_data_silence:
+                    logger.warning(f"⚠️ [{self.exchange_id}] No price data received for {time_since_data:.0f}s - possible connection issue")
+                
+                # Check MongoDB connection
+                if self.client:
+                    try:
+                        self.client.admin.command('ping')
+                    except Exception as e:
+                        logger.error(f"❌ [{self.exchange_id}] MongoDB connection failed: {e}")
+                
+                # Check exchange connection
+                if self.exchange and hasattr(self.exchange, 'ping'):
+                    try:
+                        await self.exchange.ping()
+                    except Exception as e:
+                        logger.warning(f"⚠️ [{self.exchange_id}] Exchange ping failed: {e}")
+                
+                # Report health stats
+                active_watchers = len(self.trackedStuff)
+                logger.info(f"💓 [{self.exchange_id}] Health: {active_watchers} watchers, last save {time_since_save:.0f}s ago, last data {time_since_data:.0f}s ago")
+                
+                await asyncio.sleep(self.health_check_interval)
+                
+            except Exception as e:
+                logger.error(f"❌ [{self.exchange_id}] Health monitor error: {e}")
+                await asyncio.sleep(self.health_check_interval)
 
     async def initialize(self):
         """Initialize MongoDB connection and exchange instance."""
@@ -235,6 +284,7 @@ class PriceTracker:
                 
                 # Collect price data from all tracked items (now iterating over dict values)
                 priceDict = {}
+                data_received = False
 
                 for item in self.trackedStuff.values():  # Changed from list to dict.values()
                     exchange = item.get("exchange")
@@ -253,12 +303,14 @@ class PriceTracker:
                             if token not in priceDict:
                                 priceDict[token] = []
                             priceDict[token].append({"sourceId": f"{source}_last", "price": price})
+                            data_received = True
 
                         if "average" in ticker and ticker["average"] is not None:
                             price = float(ticker["average"])
                             if token not in priceDict:
                                 priceDict[token] = []
                             priceDict[token].append({"sourceId": f"{source}_average", "price": price})
+                            data_received = True
 
                     elif method == "orderbook":
                         orderbook = exchange.orderbooks.get(symbol)
@@ -271,6 +323,11 @@ class PriceTracker:
                                 if token not in priceDict:
                                     priceDict[token] = []
                                 priceDict[token].append({"sourceId": source, "price": mid_price})
+                                data_received = True
+                
+                # Update last data received time if we got any data
+                if data_received:
+                    self.last_data_received = time.time()
 
                 # Save to MongoDB for each token (synchronous operations)
                 total_prices_saved = 0
@@ -310,6 +367,7 @@ class PriceTracker:
                         continue
 
                 save_time = time.time() - start_time
+                self.last_save_time = time.time()  # Update last save time for health monitoring
                 logger.info(f"[{self.exchange_id}] {current_ts} saved {total_prices_saved} prices from {len(self.trackedStuff)} unique watchers in {save_time:.3f}s")
                 
                 # Calculate sleep time to maintain <= 1s total cycle time
@@ -344,8 +402,11 @@ class PriceTracker:
             # Start MongoDB save task
             save_task = asyncio.create_task(self.save_to_mongo())
             
+            # Start health monitor
+            health_task = asyncio.create_task(self.health_monitor())
+            
             # Combine all tasks
-            all_tasks = [watcher_task, save_task]
+            all_tasks = [watcher_task, save_task, health_task]
             self.tasks.extend(all_tasks)
             
             logger.info(f"🚀 All systems running for exchange '{self.exchange_id}'! Waiting for termination signal...")
@@ -356,8 +417,9 @@ class PriceTracker:
                 done_tasks = [task for task in all_tasks if task.done()]
                 if done_tasks:
                     logger.warning(f"⚠️ {len(done_tasks)} tasks completed unexpectedly")
+                    task_names = ["watcher_task", "save_task", "health_task"]
                     for i, task in enumerate(done_tasks):
-                        task_name = "watcher_task" if i == 0 else "save_task"
+                        task_name = task_names[i] if i < len(task_names) else f"task_{i}"
                         try:
                             exception = task.exception()
                             if exception:
