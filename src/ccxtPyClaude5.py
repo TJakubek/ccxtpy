@@ -241,7 +241,7 @@ class PriceTracker:
         
         try:
             # Try bulk methods first (more efficient)
-            if await self._setup_bulk_watchers(symbols):
+            if self.exchange_id != 'bybit' and self.exchange_id != 'bitmex' and self.exchange_id != 'gate' and self.exchange_id != 'gateio' and await self._setup_bulk_watchers(symbols):
                 logger.info(f"✅ Bulk watchers set up for '{self.exchange_id}'")
             else:
                 # Fallback to individual watchers
@@ -452,7 +452,7 @@ class PriceTracker:
                 if total_prices_saved > 0:
                     self.last_successful_save_time = time.time()
                 
-                logger.info(f"[{self.exchange_id}] {current_ts} saved {total_prices_saved} prices from {len(self.trackedStuff)} unique watchers in {save_time:.3f}s")
+                logger.info(f"{current_ts} │ {self.exchange_id:12} │ {total_prices_saved:4} prices │ {len(self.trackedStuff):3} watchers │ {save_time:.3f}s")
                 
                 # Calculate sleep time to maintain <= 1s total cycle time
                 elapsed = time.time() - start_time
