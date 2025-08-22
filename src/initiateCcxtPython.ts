@@ -3,10 +3,15 @@ import { spawn, ChildProcess } from "child_process";
 const pythonProcesses: ChildProcess[] = [];
 let cleanupListenersAdded = false;
 
-export const spawnPythonProcess = async (exchange: string) => {
+export const spawnPythonProcess = async (exchange: string, tokens?: string[]) => {
+  const args = ["./src/ccxtPyClaude5.py", exchange];
+  if (tokens && tokens.length > 0) {
+    args.push(tokens.join(","));
+  }
+  
   const pythonProcess = spawn(
-    "./bin/python3",
-    ["./src/ccxtPyClaude5.py", exchange],
+    "./venv/bin/python3",
+    args,
     {
       stdio: "inherit", // Inherit stdio to see Python output directly
     }

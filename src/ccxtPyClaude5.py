@@ -29,8 +29,8 @@ DB_NAME = "tso"
 COLLECTION_NAME = "symbols"
 general_source_id = 'ccxtPy'
 
-# List of tokens to track (base currencies)
-TOKENS = [
+# Default tokens to track (base currencies) - used as fallback
+DEFAULT_TOKENS = [
     "BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "DOGE", "DOT", "AVAX", "SHIB",
     "MATIC", "LTC", "UNI", "LINK", "ATOM", "ETC", "XLM", "BCH", "ALGO", "VET",
     "ICP", "FIL", "TRX", "APE", "NEAR", "MANA", "SAND", "AXS", "THETA", "AAVE"
@@ -40,8 +40,9 @@ TOKENS = [
 QUOTE_CURRENCIES = ["USD", "USDT", "USDC"]
 
 class PriceTracker:
-    def __init__(self, exchange_id: str):
+    def __init__(self, exchange_id: str, tokens: List[str] = None):
         self.exchange_id = exchange_id
+        self.tokens = tokens if tokens else DEFAULT_TOKENS
         self.price_data = defaultdict(lambda: defaultdict(dict))  # {token: {exchange: {pair: price}}}
         self.exchange = None
         self.client = None  # MongoDB client, initialize as None
@@ -98,7 +99,7 @@ class PriceTracker:
             await self.exchange.load_markets()
             available_pairs = []
             
-            for token in TOKENS:
+            for token in self.tokens:
                 for quote in QUOTE_CURRENCIES:
                     if self.exchange_id == "htx" and quote == "USDC":
                         pass
@@ -424,19 +425,27 @@ async def main():
     global tracker
     
     # Check command line arguments
-    if len(sys.argv) != 2:
-        logger.error("❌ Usage: python script.py <exchange_name>")
+    if len(sys.argv) < 2:
+        logger.error("❌ Usage: python script.py <exchange_name> [tokens_comma_separated]")
         sys.exit(1)
     
     exchange_id = sys.argv[1]
-    logger.info(f"🎯 Starting price tracker for exchange: '{exchange_id}'")
+    
+    # Parse tokens if provided
+    tokens = None
+    if len(sys.argv) > 2:
+        tokens_str = sys.argv[2]
+        tokens = [token.strip() for token in tokens_str.split(",") if token.strip()]
+        logger.info(f"🎯 Starting price tracker for exchange: '{exchange_id}' with {len(tokens)} tokens from MongoDB")
+    else:
+        logger.info(f"🎯 Starting price tracker for exchange: '{exchange_id}' with default tokens")
     
     # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     # Create and run tracker
-    tracker = PriceTracker(exchange_id)
+    tracker = PriceTracker(exchange_id, tokens)
     
     try:
         await tracker.run()
